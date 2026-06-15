@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from picamera2 import Picamera2
 from picamera2.devices.imx500 import IMX500
 
@@ -24,6 +25,9 @@ GRACE_PERIOD = 5.0
 tracked_slots = {}  
 next_slot_id = 1
 
+# Background thread pool dedicated entirely to slow SD card I/O tasks
+io_executor = ThreadPoolExecutor(max_workers=1)
+
 # --- Load IMX500 Labels ---
 try:
     with open("coco_labels.txt", "r") as f:
@@ -31,6 +35,19 @@ try:
 except FileNotFoundError:
     print("Error: coco_labels.txt not found.")
     exit()
+
+# --- Async Write Helper ---
+def save_burst_async(burst_frames, event_id, slot_id):
+    """Worker function that runs in the background to prevent camera loop freezes"""
+    for idx, frame_crop in enumerate(burst_frames):
+        filename = f"BATCH_{event_id}_{slot_id}_{idx}.jpg"
+        
+        # Save high-res crop
+        cv2.imwrite(os.path.join(HIGHRES_DIR, filename), frame_crop)
+        
+        # Resize and save low-res queue payload
+        frame_low = cv2.resize(frame_crop, (640, 640))
+        cv2.imwrite(os.path.join(QUEUE_DIR, filename), frame_low)
 
 # --- Camera Initialization ---
 imx = IMX500(IMX500_MODEL)
@@ -46,7 +63,7 @@ cam.set_controls({
     "ExposureTime": 3333   
 })
 
-print("[-] Pi Native Engine Active (Clean Crops, 640 Queue). Press 'q' to quit.")
+print("[-] Asynchronous Native Engine Active (Zero-Freeze). Press 'q' to quit.")
 
 try:
     while True:
@@ -54,7 +71,6 @@ try:
         meta = req.get_metadata()
         current_time = time.time()
         
-        # 1. Pull ONLY the lightweight text/math from the camera
         out = imx.get_outputs(meta)
         current_birds = []
         bird_detected_this_frame = False
@@ -67,7 +83,6 @@ try:
             scores = np.atleast_1d(np.squeeze(out[1]))
             classes = np.atleast_1d(np.squeeze(out[2]))
             
-            # Check if ANY of the detections are a confident bird
             for i in range(len(scores)):
                 conf = float(scores[i])
                 class_id = int(classes[i])
@@ -75,12 +90,10 @@ try:
                 
                 if conf > IMX_CONF_THRESHOLD and class_name == TARGET_CLASS:
                     bird_detected_this_frame = True
-                    break # Found a bird, trigger the image pull
+                    break 
             
-            # 2. LAZY LOADING: Only pull the massive RGB array into RAM if a bird is present
             if bird_detected_this_frame:
-                raw_frame = req.make_array("main").copy()
-                pristine_frame = raw_frame.copy() 
+                frame = req.make_array("main")
                 
                 for i in range(len(scores)):
                     conf = float(scores[i])
@@ -110,11 +123,10 @@ try:
                         cx = (x1 + x2) / 2.0
                         cy = (y1 + y2) / 2.0
                         
-                        # 1. CROP FIRST: Pull the crop from the untouched pristine_frame
                         crop_x1, crop_y1 = max(0, x1 - CROP_PADDING), max(0, y1 - CROP_PADDING)
                         crop_x2, crop_y2 = min(2028, x2 + CROP_PADDING), min(1520, y2 + CROP_PADDING)
                         
-                        highres_crop = pristine_frame[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+                        highres_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2].copy()
                         if highres_crop.size == 0:
                             continue
                             
@@ -122,11 +134,6 @@ try:
                             'center': (cx, cy),
                             'crop': highres_crop
                         })
-                        
-                        # 2. DRAW SECOND: Bake the bounding box onto the raw_frame for the live stream
-                        cv2.rectangle(raw_frame, (x1, y1), (x2, y2), (0, 255, 0), 4)
-                        label_text = f"bird {int(conf * 100)}%"
-                        cv2.putText(raw_frame, label_text, (x1, y1 - 15), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)
 
         # ===========================================================================
         # PHASE 2: TRACKING & BURST ASSEMBLY
@@ -175,23 +182,20 @@ try:
                     slot['cooldown_until'] = current_time + COOLDOWN_PERIOD
                     print(f"[*] Slot {active_slot_id}: Cooldown expired. Gathering new burst...")
 
-            # --- EXECUTE HIGH-RES CROP GATHERING ---
             slot = tracked_slots[active_slot_id]
             if slot.get('gathering_burst'):
                 slot['burst_frames'].append(bird['crop'])
                 
                 if len(slot['burst_frames']) >= 5:
-                    for idx, frame_crop in enumerate(slot['burst_frames']):
-                        filename = f"BATCH_{slot['event_id']}_{active_slot_id}_{idx}.jpg"
-                        
-                        # Save the crisp, clean full-resolution crop without boxes
-                        cv2.imwrite(os.path.join(HIGHRES_DIR, filename), frame_crop)
-                        
-                        # Save the 640x640 classification payload for Model 2
-                        frame_low = cv2.resize(frame_crop, (640, 640))
-                        cv2.imwrite(os.path.join(QUEUE_DIR, filename), frame_low)
+                    # Offload the slow save process entirely to the background thread
+                    io_executor.submit(
+                        save_burst_async, 
+                        slot['burst_frames'].copy(), 
+                        slot['event_id'], 
+                        active_slot_id
+                    )
                     
-                    print(f"[+] Slot {active_slot_id}: 5-frame clean burst cached & queued.")
+                    print(f"[+] Slot {active_slot_id}: 5-frame burst offloaded to background writer.")
                     slot['gathering_burst'] = False
                     slot['burst_frames'] = []
 
@@ -203,8 +207,8 @@ try:
             del tracked_slots[sid]
             print(f"[-] Slot {sid}: Bird left the feeder.")
 
-        # 3. Always release the request back to the camera hardware to free the buffer
         req.release()
 
 finally:
     cam.stop()
+    io_executor.shutdown(wait=True)
