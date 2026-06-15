@@ -46,21 +46,18 @@ cam.set_controls({
     "ExposureTime": 3333   
 })
 
-print("[-] Pi 5 Native Engine Active (Clean Crops, 640 Queue). Press 'q' to quit.")
+print("[-] Pi Native Engine Active (Clean Crops, 640 Queue). Press 'q' to quit.")
 
 try:
     while True:
         req = cam.capture_request()
-        raw_frame = req.make_array("main").copy()
-        
-        # Create an untouched copy of the frame to pull pristine crops from
-        pristine_frame = raw_frame.copy() 
-        
         meta = req.get_metadata()
         current_time = time.time()
         
+        # 1. Pull ONLY the lightweight text/math from the camera
         out = imx.get_outputs(meta)
         current_birds = []
+        bird_detected_this_frame = False
 
         # ===========================================================================
         # PHASE 1: HARDWARE BOXES & HIGH-RES CROPPING
@@ -70,50 +67,66 @@ try:
             scores = np.atleast_1d(np.squeeze(out[1]))
             classes = np.atleast_1d(np.squeeze(out[2]))
             
+            # Check if ANY of the detections are a confident bird
             for i in range(len(scores)):
                 conf = float(scores[i])
                 class_id = int(classes[i])
                 class_name = coco_labels[class_id] if class_id < len(coco_labels) else "unknown"
                 
                 if conf > IMX_CONF_THRESHOLD and class_name == TARGET_CLASS:
-                    xmin, ymin, xmax, ymax = boxes[i]
+                    bird_detected_this_frame = True
+                    break # Found a bird, trigger the image pull
+            
+            # 2. LAZY LOADING: Only pull the massive RGB array into RAM if a bird is present
+            if bird_detected_this_frame:
+                raw_frame = req.make_array("main").copy()
+                pristine_frame = raw_frame.copy() 
+                
+                for i in range(len(scores)):
+                    conf = float(scores[i])
+                    class_id = int(classes[i])
+                    class_name = coco_labels[class_id] if class_id < len(coco_labels) else "unknown"
                     
-                    if xmax <= 1.0 and ymax <= 1.0:
-                        xmin, xmax = xmin * 640, xmax * 640
-                        ymin, ymax = ymin * 640, ymax * 640
-                    
-                    y_padding_640 = (640 - 480) / 2
-                    ymin, ymax = ymin - y_padding_640, ymax - y_padding_640
-                    
-                    scale_factor = 2028.0 / 640.0  
-                    
-                    x1 = max(0, int(xmin * scale_factor))
-                    y1 = max(0, int(ymin * scale_factor))
-                    x2 = min(2028, int(xmax * scale_factor))
-                    y2 = min(1520, int(ymax * scale_factor))
-                    
-                    if x1 >= x2 or y1 >= y2:
-                        continue
-                    
-                    cx = (x1 + x2) / 2.0
-                    cy = (y1 + y2) / 2.0
-                    # 1. CROP FIRST: Pull the crop from the untouched pristine_frame
-                    crop_x1, crop_y1 = max(0, x1 - CROP_PADDING), max(0, y1 - CROP_PADDING)
-                    crop_x2, crop_y2 = min(2028, x2 + CROP_PADDING), min(1520, y2 + CROP_PADDING)
-                    
-                    highres_crop = pristine_frame[crop_y1:crop_y2, crop_x1:crop_x2].copy()
-                    if highres_crop.size == 0:
-                        continue
+                    if conf > IMX_CONF_THRESHOLD and class_name == TARGET_CLASS:
+                        xmin, ymin, xmax, ymax = boxes[i]
                         
-                    current_birds.append({
-                        'center': (cx, cy),
-                        'crop': highres_crop
-                    })
-                    
-                    # 2. DRAW SECOND: Bake the bounding box onto the raw_frame for the live stream
-                    cv2.rectangle(raw_frame, (x1, y1), (x2, y2), (0, 255, 0), 4)
-                    label_text = f"bird {int(conf * 100)}%"
-                    cv2.putText(raw_frame, label_text, (x1, y1 - 15), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)
+                        if xmax <= 1.0 and ymax <= 1.0:
+                            xmin, xmax = xmin * 640, xmax * 640
+                            ymin, ymax = ymin * 640, ymax * 640
+                        
+                        y_padding_640 = (640 - 480) / 2
+                        ymin, ymax = ymin - y_padding_640, ymax - y_padding_640
+                        
+                        scale_factor = 2028.0 / 640.0  
+                        
+                        x1 = max(0, int(xmin * scale_factor))
+                        y1 = max(0, int(ymin * scale_factor))
+                        x2 = min(2028, int(xmax * scale_factor))
+                        y2 = min(1520, int(ymax * scale_factor))
+                        
+                        if x1 >= x2 or y1 >= y2:
+                            continue
+                        
+                        cx = (x1 + x2) / 2.0
+                        cy = (y1 + y2) / 2.0
+                        
+                        # 1. CROP FIRST: Pull the crop from the untouched pristine_frame
+                        crop_x1, crop_y1 = max(0, x1 - CROP_PADDING), max(0, y1 - CROP_PADDING)
+                        crop_x2, crop_y2 = min(2028, x2 + CROP_PADDING), min(1520, y2 + CROP_PADDING)
+                        
+                        highres_crop = pristine_frame[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+                        if highres_crop.size == 0:
+                            continue
+                            
+                        current_birds.append({
+                            'center': (cx, cy),
+                            'crop': highres_crop
+                        })
+                        
+                        # 2. DRAW SECOND: Bake the bounding box onto the raw_frame for the live stream
+                        cv2.rectangle(raw_frame, (x1, y1), (x2, y2), (0, 255, 0), 4)
+                        label_text = f"bird {int(conf * 100)}%"
+                        cv2.putText(raw_frame, label_text, (x1, y1 - 15), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)
 
         # ===========================================================================
         # PHASE 2: TRACKING & BURST ASSEMBLY
@@ -161,7 +174,8 @@ try:
                     slot['burst_frames'] = []
                     slot['cooldown_until'] = current_time + COOLDOWN_PERIOD
                     print(f"[*] Slot {active_slot_id}: Cooldown expired. Gathering new burst...")
-# --- EXECUTE HIGH-RES CROP GATHERING ---
+
+            # --- EXECUTE HIGH-RES CROP GATHERING ---
             slot = tracked_slots[active_slot_id]
             if slot.get('gathering_burst'):
                 slot['burst_frames'].append(bird['crop'])
@@ -189,6 +203,7 @@ try:
             del tracked_slots[sid]
             print(f"[-] Slot {sid}: Bird left the feeder.")
 
+        # 3. Always release the request back to the camera hardware to free the buffer
         req.release()
 
 finally:
