@@ -21,26 +21,7 @@ BirdCam resolves these hardware constraints by dividing the computer vision work
    * **Function:** Deep-dive classification and validation.
    * **Execution:** Runs asynchronously on a designated host or secondary node (e.g., Pi Zero 2 W) using a custom PyTorch model (`best.pt`). Because it processes isolated 5-frame burst datasets rather than ingesting a continuous live stream, per-frame processing time is no longer a critical bottleneck. This structural decoupling allows the host to run a significantly larger, parameter-dense, high-fidelity model loaded with specific avian classes. Trading the immediate time constraints of real-time video feeds for offline batch processing directly improves classification accuracy for complex, highly similar bird species.
 
-
-```mermaid
-graph LR
-    subgraph "Stage 1: Capture Engine"
-        A[Frame Capture] --> B[Track Visitor]
-        B --> C[Queue Low-Res Frames]
-        B --> D[Cache High-Res Crops]
-    end
-
-    subgraph "Stage 2: Analyze Engine"
-        C --> E[Aggregate 5-Frame Burst]
-        E --> F[Classify Species]
-        F --> G{Verify Consensus}
-    end
-
-    G -->|Passed| H[Retrieve High-Res Crop]
-    G -->|Failed| I[Purge Burst]
-    D -.-> H
-    H --> J[Send Webhook Alert]
-```
+![](assets/architectureflowchart.png)
 
 ## ⚙️ Installation & Setup
 
@@ -73,25 +54,7 @@ An asynchronous processing background service engineered to sit cleanly on const
 * **Species Suppression Log:** References an adjustable global tracking log (`GLOBAL_COOLDOWN = 300.0`) per individual species, preventing repeat visitors from spamming web endpoints.
 * **Payload Ingestion Handover:** After confirming a successful detection match, it pulls the matching pristine source asset from the high-res cache directory, names it using structured metadata (`YYYYMMDD_HHMMSS_Species.jpg`), cleans up temporary work directories, and initiates the remote transmission hook.
 
-```mermaid
-flowchart LR
-    A([IMX500 Trigger]) --> B{Bounding Box Dist < 475px?}
-    
-    B -->|Yes| C[Update Tracker]
-    B -->|No| D[New Slot ID]
-    
-    C & D --> E{5 Frames Saved?}
-    E -->|No| F([Wait & Save])
-    E -->|Yes| G[best.pt + Majority Vote]
-    
-    %% Housekeeping Grace Period
-    F -.-> K{Inactive > 5.0s?}
-    K -.->|Yes| L([Purge Tracker Slot])
-    
-    G --> H{Pass Vote & Cooldown Cleared?}
-    H -->|No| I([Discard / Suppress])
-    H -->|Yes| J([Fetch High-Res & Webhook])
-```
+![](assets/logicflowchart.png)
 
 ### 🌐 Cloud & Visualization Layer
 
