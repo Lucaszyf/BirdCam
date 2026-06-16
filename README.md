@@ -44,15 +44,16 @@ The frontend execution script is designed to run natively on the primary hardwar
 * **Dual-Payload Burst:** Once a target slot registers an arrival, it enforces a strict 5-frame micro-burst window. For each frame, it saves two distinct image assets:
   1. A low-resolution (`640x640`) matrix optimized for rapid inference, saved directly to the classification pipeline (`queue/`).
   2. An untouched, box-free full-resolution crop with added bounding padding, saved to the local image cache (`highres_cache/`).
-* **Automated Housekeeping:** Drops inactive slots instantly when a target leaves the detection zone after a short buffer loop (`GRACE_PERIOD = 5.0`).
+* **Zero-Freeze I/O Offloading:** Utilizes a dedicated asynchronous background thread (`ThreadPoolExecutor`) to write the bursts to the SD card. This ensures the primary camera tracking loop never stutters or drops frames during heavy disk operations.
+* **Automated Housekeeping:** Drops inactive slots and cleans up memory when a target leaves the detection zone after a short buffer loop (`GRACE_PERIOD = 5.0`).
 
 #### [analyze.py](analyze.py)
 An asynchronous processing background service engineered to sit cleanly on constrained edge hardware (such as a Raspberry Pi Zero 2 W or a host system container) without impacting camera frame rates.
+* **State-Machine Batching:** Implements a strict "complete-or-purge" logic. It waits patiently for a full 5-frame burst to accumulate before initiating inference, ensuring the model never processes incomplete or half-written data.
+* **Stale-Event Recovery:** Automatically detects and purges orphaned or stalled events (older than 60s) to prevent queue congestion.
 * **Resource Optimization:** Limits PyTorch thread usage to a maximum of 2 parallel threads (`OMP_NUM_THREADS = 2`) to ensure that intense inference calls do not trigger network timeouts or OS kernel locks on low-tier CPUs.
-* **Batch Assembly & Filtering:** Groups incoming frames inside the classification directory dynamically by their unique event tokens. It also filters out stale, incomplete frame sets older than 60 seconds.
-* **Sequential Voting Consensus:** Pulls complete 5-frame batches and processes them sequentially using the custom species classification model (`best.pt`). It requires a clean majority vote (mode evaluation) across the frames to prevent edge blurs or fleeting shadows from triggering false positives.
+* **Consensus Voting:** Runs sequential inference on the 5-frame burst, requiring a clean majority vote (mode evaluation) to confirm a species identity, effectively filtering out edge blurs or fleeting shadows.
 * **Species Suppression Log:** References an adjustable global tracking log (`GLOBAL_COOLDOWN = 300.0`) per individual species, preventing repeat visitors from spamming web endpoints.
-* **Payload Ingestion Handover:** After confirming a successful detection match, it pulls the matching pristine source asset from the high-res cache directory, names it using structured metadata (`YYYYMMDD_HHMMSS_Species.jpg`), cleans up temporary work directories, and initiates the remote transmission hook.
 
 ![](assets/logicflowchart.png)
 
