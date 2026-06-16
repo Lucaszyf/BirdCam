@@ -36,7 +36,7 @@ git clone [https://github.com/Lucaszyf/birdcam.git](https://github.com/Lucaszyf/
 cd birdcam
 ```
 **⚠️ Configuration Note**
-Before running the pipeline, you **should** configure your notification and viewing endpoints based on your setup.
+Before running the pipeline, you **must** configure your notification and viewing endpoints based on your setup.
 
 ### Option A: Hosting with a Cloud VPS
 If you are deploying this with a remote server, your web dashboard code (`vps_app.py`) runs directly on your VPS. It acts as a middleman: catching frames from the Raspberry Pi, saving them for the web gallery, and forwarding alerts to Discord.
@@ -44,47 +44,16 @@ If you are deploying this with a remote server, your web dashboard code (`vps_ap
 1. **Install VPS Prerequisites:** Run this command in your VPS terminal to install the minimal Python dependencies required to host the dashboard:
    ```bash
    pip3 install flask requests
+   ```
 2. Open `vps_app.py` on your server and update your `DISCORD_WEBHOOK_URL` and `VPS_PUBLIC_URL` near the top of the script
-3. Open `analyze.py` on your Raspberry Pi and modify the `VPS_WEBHOOK_URL` string near the top to hit your VPS webhook route and replace `ENTER YOUR WEBPAGE URL` with your `VPS_PUBLIC_URL` in the previous step
+3. Open `analyze.py` on your Raspberry Pi and modify the `VPS_WEBHOOK_URL` to your VPS webhook route and replace `GALLERY_URL` with your `VPS_PUBLIC_URL` from the previous step
 
 ### Option B: Hosting Locally on Pi
-If you don't have a VPS, you can still use Discord for free mobile alerts and host the Flask web gallery directly on your Raspberry Pi within your home network.
+If you don't have a VPS, you can still use Discord for free mobile alerts and host the Flask web gallery directly on your Raspberry Pi within your home network. Because the edge script is natively compatible with Discord's API, setup is completely plug-and-play.
 
-1. **Replace the Webhook Function:** Open `analyze.py` and completely replace the existing `send_to_vps_webhook` function with this updated version. This imports `json`, formats the payload to match Discord's specific multi-part rules, and accurately checks for Discord's unique `204` success status code:
-
-   ```python
-   import json
-
-   def send_to_vps_webhook(image_path, species_name):
-       print(f"[Network] Firing webhook to Discord for {species_name}...")
-       try:
-           with open(image_path, "rb") as f:
-               filename = os.path.basename(image_path)
-               
-               # Formatted message using Discord markdown syntax
-               message_content = (
-                   f"**New Visitor Alert!** A **{species_name.replace('-', ' ')}** has arrived!\n"
-                   f"**View Gallery:** http://YOUR_PI_IP_ADDRESS:5000"
-               )
-               
-               payload = {"content": message_content}
-               files = {
-                   "payload_json": (None, json.dumps(payload)),
-                   "file": (filename, f, "image/jpeg")
-               }
-               
-               response = requests.post(VPS_WEBHOOK_URL, files=files, timeout=15)
-               
-               # Discord returns an HTTP 204 on success instead of 200
-               if response.status_code == 204:
-                   print("[Network] Webhook successfully delivered to Discord!")
-               else:
-                   print(f"[Network Error] Discord returned status {response.status_code}: {response.text}")
-       except Exception as e:
-           print(f"[Network Error] Failed to connect to Discord: {e}")
-2. **Set your Discord Webhook URL:** Near the top of `analyze.py`, find the `VPS_WEBHOOK_URL` configuration line and paste your actual Discord channel webhook URL into the string
-3. Configure your Pi's Local IP: Inside the freshly pasted function, replace  `YOUR_PI_IP_ADDRESS` with your Raspberry Pi's actual local network IP address so devices on your Wi-Fi can open the gallery link.
-
+1. Open `analyze.py` on your Raspberry Pi and modify the variables at the top of the file:
+   * Change `VPS_WEBHOOK_URL` to your actual **Discord Webhook URL**.
+   * Change `GALLERY_URL` to your Raspberry Pi's local network IP address (e.g., `http://192.168.1.50:5000`) so devices on your Wi-Fi can click the link in Discord to open the gallery.
 
 ## Running the Pipeline
 To run the camera stream and the AI processing simultaneously, you need to execute the scripts in **two separate terminal windows** (or two separate SSH sessions).
@@ -95,7 +64,7 @@ Run the capture script to begin monitoring the AI Camera feed using Picamera2 an
 python capture.py
 ```
 ### Terminal Window 2: Start the AI Analyzer
-In a separate window, run the analyzer script to process incoming image batches and evaluate detections using the YOLO11 model.
+In a separate window, run the analyzer script to process incoming image batches and evaluate detections using the YOLO11 model. **The script may take a few minutes to boot.**
 ```bash
 python analyze.py
 ```
